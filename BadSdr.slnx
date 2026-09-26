@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BadSdr.App/BadSdr.App.csproj" />
+    <Project Path="src/BadSdr.Core/BadSdr.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BadSdr.Tests/BadSdr.Tests.csproj" />
+  </Folder>
+  <Project Path="../dmr/src/Dmr/Dmr.csproj" />
+  <Project Path="../iq-channelizer/src/IqChannelizer/IqChannelizer.csproj" />
+</Solution>

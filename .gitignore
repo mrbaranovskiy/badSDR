@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+.vs/
+.idea/
+artifacts/
+*.user
+*.db
+*.db-shm
+*.db-wal
+*.db.lock

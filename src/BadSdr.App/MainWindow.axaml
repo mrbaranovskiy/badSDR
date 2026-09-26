@@ -1,0 +1,130 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:BadSdr.App.Controls" x:Class="BadSdr.App.MainWindow"
+        Title="badSDR · DMR receiver lab" Width="1500" Height="960" MinWidth="1140" MinHeight="780">
+  <Grid RowDefinitions="76,*,38" Margin="22,0">
+    <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+      <StackPanel Orientation="Horizontal" Spacing="14">
+        <Border Background="#163D43" CornerRadius="8" Width="42" Height="42"><TextBlock Text="RF" FontSize="18" FontWeight="Bold" Foreground="#59DFCD" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
+        <StackPanel Spacing="2"><TextBlock Text="badSDR" FontSize="24" FontWeight="SemiBold"/><TextBlock Text="DMR RECEIVER LAB   /   IQ → CHANNELS → SESSIONS" Classes="section" FontSize="10"/></StackPanel>
+      </StackPanel>
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+        <Border Background="#172539" CornerRadius="14" Padding="13,6" VerticalAlignment="Center"><TextBlock x:Name="StateText" Text="●  IDLE" FontSize="11" Foreground="#A8B8CE"/></Border>
+        <Button x:Name="StartButton" Classes="primary" Content="▶  Start receiver" Click="StartClicked" Padding="20,9"/>
+        <Button x:Name="StopButton" Content="■  Stop" Click="StopClicked" IsEnabled="False" Padding="16,9"/>
+      </StackPanel>
+    </Grid>
+    <Grid Grid.Row="1" ColumnDefinitions="278,16,*">
+      <Border Classes="panel" Padding="16">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Spacing="9">
+            <TextBlock Text="RECEIVER SETUP" Classes="section" Margin="0,0,0,5"/>
+            <TextBlock Text="Input source" Classes="muted"/>
+            <ComboBox x:Name="SourceBox" SelectionChanged="SourceChanged"/>
+            <StackPanel x:Name="DevicePanel" Spacing="8">
+              <TextBlock Text="UHD device arguments" Classes="muted"/>
+              <TextBox x:Name="ArgumentsBox" Watermark="addr=192.168.10.2 or type=b200"/>
+              <Button x:Name="DiscoverButton" Content="Discover USRP devices" Click="DiscoverClicked" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"/>
+              <ComboBox x:Name="DevicesBox" IsVisible="False" SelectionChanged="DeviceSelected"/>
+            </StackPanel>
+            <StackPanel x:Name="ReplayPanel" Spacing="8" IsVisible="False">
+              <TextBlock Text="Recording path" Classes="muted"/>
+              <TextBox x:Name="ReplayPathBox" Watermark="Stereo IQ WAV or raw IQ"/>
+              <Grid ColumnDefinitions="*,8,*"><Button Content="Browse…" Click="BrowseClicked"/><Button Grid.Column="2" Content="DMR fixture" Click="FixtureClicked"/></Grid>
+              <ComboBox x:Name="FormatBox"/>
+              <CheckBox x:Name="RealtimeBox" Content="Replay at real-time speed" IsChecked="True" FontSize="12"/>
+            </StackPanel>
+            <TextBlock Text="Centre frequency · MHz" Classes="muted"/>
+            <TextBox x:Name="CenterBox" Text="435.000000"/>
+            <TextBlock Text="Sample rate · samples/s" Classes="muted"/>
+            <TextBox x:Name="RateBox" Text="1000000"/>
+            <Grid ColumnDefinitions="*,10,*">
+              <StackPanel Spacing="8"><TextBlock Text="Gain · dB" Classes="muted"/><TextBox x:Name="GainBox" Text="30"/></StackPanel>
+              <StackPanel Grid.Column="2" Spacing="8"><TextBlock Text="Bandwidth · Hz" Classes="muted"/><TextBox x:Name="BandwidthBox" Text="1000000"/></StackPanel>
+            </Grid>
+            <Grid ColumnDefinitions="*,10,*">
+              <StackPanel Spacing="8"><TextBlock Text="Antenna" Classes="muted"/><TextBox x:Name="AntennaBox" Text="RX2"/></StackPanel>
+              <StackPanel Grid.Column="2" Spacing="8"><TextBlock Text="RX channel" Classes="muted"/><TextBox x:Name="RxChannelBox" Text="0"/></StackPanel>
+            </Grid>
+            <Button x:Name="ConnectButton" Content="Connect / apply settings" Click="ConnectClicked" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Margin="0,4"/>
+            <Separator Margin="0,7"/>
+            <TextBlock Text="PROCESSING" Classes="section"/>
+            <TextBlock Text="Routing" Classes="muted"/><ComboBox x:Name="ProcessingBox"/>
+            <TextBlock Text="Channelizer strategy" Classes="muted"/><ComboBox x:Name="StrategyBox"/>
+            <TextBlock Text="Compute backend" Classes="muted"/><ComboBox x:Name="BackendBox"/>
+            <Grid ColumnDefinitions="*,10,*">
+              <StackPanel Spacing="8"><TextBlock Text="IQ block size" Classes="muted"/><TextBox x:Name="BlockBox" Text="32768"/></StackPanel>
+              <StackPanel Grid.Column="2" Spacing="8"><TextBlock Text="Queue blocks" Classes="muted"/><TextBox x:Name="QueueBox" Text="8"/></StackPanel>
+            </Grid>
+            <TextBlock Text="Changes take effect on Connect / apply or Start. WAV replay uses its header sample rate." TextWrapping="Wrap" Classes="muted" Margin="0,4"/>
+          </StackPanel>
+        </ScrollViewer>
+      </Border>
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="104"/><RowDefinition Height="14"/>
+          <RowDefinition Height="*" MinHeight="290"/><RowDefinition Height="12"/>
+          <RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="1.05*"/>
+        </Grid.RowDefinitions>
+        <Grid ColumnDefinitions="*,12,*,12,*,12,*">
+          <Border Classes="panel" Padding="15,11"><StackPanel Spacing="5"><TextBlock Text="IQ LOSS · APPLICATION" Classes="section" FontSize="10"/><TextBlock x:Name="DropText" Text="0.00%" Classes="metric" Foreground="#55D9C6"/><TextBlock x:Name="DropDetail" Text="0 samples dropped" Classes="muted" FontSize="11"/></StackPanel></Border>
+          <Border Grid.Column="2" Classes="panel" Padding="15,11"><StackPanel Spacing="5"><TextBlock Text="PROCESSING RATE" Classes="section" FontSize="10"/><TextBlock x:Name="ThroughputText" Text="— MS/s" Classes="metric"/><TextBlock x:Name="ThroughputDetail" Text="Waiting for samples" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis"/></StackPanel></Border>
+          <Border Grid.Column="4" Classes="panel" Padding="15,11"><StackPanel Spacing="5"><TextBlock Text="UHD OVERFLOWS" Classes="section" FontSize="10"/><TextBlock x:Name="OverflowText" Text="0" Classes="metric"/><TextBlock x:Name="OverflowDetail" Text="Missing sample count unknown" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis"/></StackPanel></Border>
+          <Border Grid.Column="6" Classes="panel" Padding="15,11"><StackPanel Spacing="5"><TextBlock Text="SESSION DATABASE" Classes="section" FontSize="10"/><TextBlock x:Name="DatabaseText" Text="0 events" Classes="metric"/><TextBlock x:Name="DatabaseDetail" Text="SQLite · waiting" Classes="muted" FontSize="11"/></StackPanel></Border>
+        </Grid>
+        <Grid Grid.Row="2" ColumnDefinitions="*,12,240">
+          <Border Classes="panel" Padding="14,12">
+            <Grid RowDefinitions="Auto,*,Auto">
+              <Grid ColumnDefinitions="*,Auto"><TextBlock Text="LIVE SPECTRUM" Classes="section"/><TextBlock x:Name="SpanText" Grid.Column="1" Text="1.000 MHz span" Classes="muted"/></Grid>
+              <local:SpectrumControl x:Name="Spectrum" Grid.Row="1" Margin="0,12,0,3"/>
+              <TextBlock Grid.Row="2" Text="Double-click to add  ·  Drag to tune  ·  Right-click to remove  ·  Wheel to zoom" Classes="muted" FontSize="10"/>
+            </Grid>
+          </Border>
+          <Border Grid.Column="2" Classes="panel" Padding="14,12">
+            <Grid RowDefinitions="Auto,*,Auto,Auto,Auto" RowSpacing="10">
+              <Grid ColumnDefinitions="*,Auto"><TextBlock Text="LISTENING CHANNELS" Classes="section" FontSize="10"/><TextBlock x:Name="ChannelCountText" Grid.Column="1" Text="00" Foreground="#50D9C4"/></Grid>
+              <ListBox x:Name="ChannelsList" Grid.Row="1" Background="Transparent" SelectionChanged="ChannelSelected">
+                <ListBox.ItemTemplate><DataTemplate><StackPanel Spacing="3" Margin="0,4"><TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12"/><TextBlock Text="{Binding Label}" Classes="muted" FontSize="11"/></StackPanel></DataTemplate></ListBox.ItemTemplate>
+              </ListBox>
+              <StackPanel Grid.Row="2" Spacing="5"><TextBlock Text="Channel frequency · MHz" Classes="muted" FontSize="11"/><TextBox x:Name="ChannelFrequencyBox" Text="435.000000"/></StackPanel>
+              <Grid Grid.Row="3" ColumnDefinitions="*,6,*"><Button x:Name="AddButton" Content="+ Add" Click="AddClicked"/><Button x:Name="RetuneButton" Grid.Column="2" Content="Retune" Click="RetuneClicked"/></Grid>
+              <Button x:Name="RemoveButton" Grid.Row="4" Content="Remove selected" Click="RemoveClicked" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"/>
+            </Grid>
+          </Border>
+        </Grid>
+        <Border Grid.Row="4" Background="#111B2A" CornerRadius="5" Padding="12,8">
+          <Grid ColumnDefinitions="*,Auto"><TextBlock x:Name="PlanText" Text="Add channels before or during reception. Start with no channels to inspect the spectrum." TextTrimming="CharacterEllipsis" FontSize="11" Foreground="#9BB1CD"/><TextBlock x:Name="TimingText" Grid.Column="1" Margin="12,0,0,0" FontSize="11" Foreground="#59D7C7"/></Grid>
+        </Border>
+        <Border Grid.Row="6" Classes="panel" Padding="0,12,0,0">
+          <Grid RowDefinitions="Auto,*,Auto">
+            <Grid ColumnDefinitions="*,Auto" Margin="15,0,15,10"><StackPanel Orientation="Horizontal" Spacing="12"><TextBlock Text="CAPTURED SESSIONS" Classes="section"/><TextBlock x:Name="SessionCountText" Text="0 sessions" Classes="muted" FontSize="11"/></StackPanel><Button Grid.Column="1" Content="Open data folder" Click="OpenDataFolderClicked" FontSize="11" MinHeight="24" Padding="8,3"/></Grid>
+            <Grid Grid.Row="1">
+              <DataGrid x:Name="SessionsGrid" IsReadOnly="True" AutoGenerateColumns="False" CanUserResizeColumns="True" CanUserSortColumns="True" SelectionMode="Single" SelectionChanged="SessionSelected">
+                <DataGrid.Columns>
+                  <DataGridTextColumn Header="Started (local)" Binding="{Binding Started}" Width="166"/>
+                  <DataGridTextColumn Header="MHz" Binding="{Binding Frequency}" Width="100"/>
+                  <DataGridTextColumn Header="Slot / track" Binding="{Binding SlotLabel}" Width="112"/>
+                  <DataGridTextColumn Header="CC" Binding="{Binding ColourCode}" Width="58"/>
+                  <DataGridTextColumn Header="Source" Binding="{Binding SourceId}" Width="78"/>
+                  <DataGridTextColumn Header="Destination" Binding="{Binding DestinationId}" Width="110"/>
+                  <DataGridTextColumn Header="Privacy" Binding="{Binding Privacy}" Width="154"/>
+                  <DataGridTextColumn Header="State" Binding="{Binding State}" Width="82"/>
+                  <DataGridTextColumn Header="Duration" Binding="{Binding Duration}" Width="78"/>
+                  <DataGridTextColumn Header="End reason" Binding="{Binding EndReason}" Width="110"/>
+                  <DataGridTextColumn Header="Frames" Binding="{Binding Frames}" Width="80"/>
+                </DataGrid.Columns>
+              </DataGrid>
+              <StackPanel x:Name="EmptySessions" VerticalAlignment="Center" HorizontalAlignment="Center" Spacing="8" IsHitTestVisible="False"><TextBlock Text="Waiting for DMR activity" FontSize="17" HorizontalAlignment="Center" Foreground="#9CADC3"/><TextBlock Text="Call metadata appears here and is saved to SQLite." Classes="muted"/><TextBlock Text="Unknown IDs and vendor privacy remain unknown." Classes="muted" HorizontalAlignment="Center"/></StackPanel>
+            </Grid>
+            <Expander Grid.Row="2" Header="Selected session · raw metadata" HorizontalAlignment="Stretch" FontSize="11" MaxHeight="180">
+              <TextBox x:Name="MetadataBox" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" FontFamily="Cascadia Code,Consolas" FontSize="11" MaxHeight="130"/>
+            </Expander>
+          </Grid>
+        </Border>
+      </Grid>
+    </Grid>
+    <Grid Grid.Row="2" ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+      <TextBlock x:Name="StatusText" Text="Ready. Connect a USRP, replay an IQ recording, or inspect the synthetic test signal." FontSize="11" TextTrimming="CharacterEllipsis" Foreground="#93A7C3"/>
+      <TextBlock x:Name="QueueText" Grid.Column="1" Text="IQ queue 0 / 8" FontSize="11" Foreground="#7B91AE" Margin="12,0,0,0"/>
+    </Grid>
+  </Grid>
+</Window>
