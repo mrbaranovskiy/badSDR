@@ -16,6 +16,7 @@ public sealed class CapturePipeline : IAsyncDisposable
     private readonly int blockSize;
     private readonly Channel<Block> queue;
     private readonly CancellationTokenSource cancellation = new();
+    private readonly CancellationTokenRegistration processorFailureRegistration;
     private readonly Action checkStorage;
     private readonly bool ownsSource;
     private Task completion = Task.CompletedTask;
@@ -44,14 +45,19 @@ public sealed class CapturePipeline : IAsyncDisposable
         {
             // TryWrite implements drop-newest explicitly so ownership and exact counts remain visible.
             FullMode = BoundedChannelFullMode.Wait, SingleWriter = true, SingleReader = true,
-            AllowSynchronousContinuations = false
+            // The dedicated consumer blocks on AsTask/GetResult; completing its waiter
+            // only wakes that thread. Avoid routing this wake-up through the thread pool.
+            AllowSynchronousContinuations = true
         });
+        processorFailureRegistration = processor.FailureToken.Register(() =>
+            Fail(processor.Failure ?? new IOException("A decoder worker failed.")));
     }
 
     public void Start()
     {
         if (started) throw new InvalidOperationException("Capture has already started.");
         started = true;
+        Metrics.Start();
         var consumer = Task.Factory.StartNew(Consume, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         var producer = Task.Factory.StartNew(Produce, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         completion = FinishAsync(producer, consumer);
@@ -63,6 +69,9 @@ public sealed class CapturePipeline : IAsyncDisposable
         long sampleIndex = 0, generation = 0;
         try
         {
+            // Pool initialization and first-buffer page faults must happen before the
+            // radio starts producing IQ; at 40 MS/s its transport can fill in milliseconds.
+            owned = ArrayPool<ComplexF>.Shared.Rent(blockSize);
             source.Start();
             while (!cancellation.IsCancellationRequested)
             {
@@ -71,13 +80,20 @@ public sealed class CapturePipeline : IAsyncDisposable
                 if (read.Count < 0 || read.Count > blockSize) throw new IOException("Source returned an invalid IQ count.");
                 if (read.Overflow) Interlocked.Increment(ref Metrics.Overflows);
                 if (read.Timeout) Interlocked.Increment(ref Metrics.Timeouts);
+                if (read.RxRestarted) Interlocked.Increment(ref Metrics.RxRestarts);
                 if (read.Discontinuity) { generation++; Interlocked.Exchange(ref sourceGeneration, generation); }
                 if (read.Count > 0)
                 {
                     Interlocked.Add(ref Metrics.Received, read.Count);
                     var block = new Block(owned, read.Count, sampleIndex, generation);
                     sampleIndex += read.Count;
-                    if (queue.Writer.TryWrite(block)) owned = null;
+                    if (queue.Writer.TryWrite(block))
+                    {
+                        owned = null;
+                        // Only the producer writes this high-water mark.
+                        int queued = queue.Reader.Count;
+                        if (queued > Metrics.PeakQueuedBlocks) Volatile.Write(ref Metrics.PeakQueuedBlocks, queued);
+                    }
                     else Interlocked.Add(ref Metrics.Dropped, read.Count);
                 }
                 if (read.EndOfStream) break;
@@ -109,8 +125,13 @@ public sealed class CapturePipeline : IAsyncDisposable
                         var input = block.Buffer.AsSpan(0, block.Count);
                         spectrum.Offer(input);
                         long start = Stopwatch.GetTimestamp();
-                        processor.Process(input, block.FirstSample, block.Generation != generation);
-                        Interlocked.Add(ref Metrics.ProcessingTicks, Stopwatch.GetTimestamp() - start);
+                        try { processor.Process(input, block.FirstSample, block.Generation != generation); }
+                        finally
+                        {
+                            long ticks = Stopwatch.GetTimestamp() - start;
+                            Interlocked.Add(ref Metrics.ProcessingTicks, ticks);
+                            if (ticks > Metrics.MaxBlockTicks) Interlocked.Exchange(ref Metrics.MaxBlockTicks, ticks);
+                        }
                         Interlocked.Add(ref Metrics.Processed, block.Count);
                         generation = block.Generation;
                         lastSample = block.FirstSample + block.Count;
@@ -123,6 +144,7 @@ public sealed class CapturePipeline : IAsyncDisposable
         catch (Exception error) { Fail(error); }
         finally
         {
+            long start = Stopwatch.GetTimestamp();
             try
             {
                 // A gap at the very end has no following buffer on which to attach its marker.
@@ -131,6 +153,7 @@ public sealed class CapturePipeline : IAsyncDisposable
                 processor.Complete(cancellation.IsCancellationRequested || Failure is not null);
             }
             catch (Exception error) { Fail(error); }
+            finally { Interlocked.Add(ref Metrics.ProcessingTicks, Stopwatch.GetTimestamp() - start); }
         }
     }
 
@@ -160,6 +183,7 @@ public sealed class CapturePipeline : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await StopAsync();
+        processorFailureRegistration.Dispose();
         try { processor.Dispose(); }
         finally
         {

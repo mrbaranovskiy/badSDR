@@ -45,6 +45,11 @@
               <StackPanel Spacing="8"><TextBlock Text="Antenna" Classes="muted"/><TextBox x:Name="AntennaBox" Text="RX2"/></StackPanel>
               <StackPanel Grid.Column="2" Spacing="8"><TextBlock Text="RX channel" Classes="muted"/><TextBox x:Name="RxChannelBox" Text="0"/></StackPanel>
             </Grid>
+            <StackPanel x:Name="WireFormatPanel" Spacing="6">
+              <TextBlock Text="USRP link format" Classes="muted"/>
+              <ComboBox x:Name="WireFormatBox"/>
+              <TextBlock Text="sc16: full precision. sc8: half the link traffic, less dynamic range." Classes="muted" FontSize="10" TextWrapping="Wrap"/>
+            </StackPanel>
             <Button x:Name="ConnectButton" Content="Connect / apply settings" Click="ConnectClicked" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Margin="0,4"/>
             <Separator Margin="0,7"/>
             <TextBlock Text="PROCESSING" Classes="section"/>
@@ -62,7 +67,7 @@
       <Grid Grid.Column="2">
         <Grid.RowDefinitions>
           <RowDefinition Height="104"/><RowDefinition Height="14"/>
-          <RowDefinition Height="*" MinHeight="290"/><RowDefinition Height="12"/>
+          <RowDefinition Height="1.4*" MinHeight="330"/><RowDefinition Height="12"/>
           <RowDefinition Height="Auto"/><RowDefinition Height="12"/><RowDefinition Height="1.05*"/>
         </Grid.RowDefinitions>
         <Grid ColumnDefinitions="*,12,*,12,*,12,*">
@@ -73,10 +78,21 @@
         </Grid>
         <Grid Grid.Row="2" ColumnDefinitions="*,12,240">
           <Border Classes="panel" Padding="14,12">
-            <Grid RowDefinitions="Auto,*,Auto">
+            <Grid RowDefinitions="Auto,1.15*,Auto,*,Auto">
               <Grid ColumnDefinitions="*,Auto"><TextBlock Text="LIVE SPECTRUM" Classes="section"/><TextBlock x:Name="SpanText" Grid.Column="1" Text="1.000 MHz span" Classes="muted"/></Grid>
-              <local:SpectrumControl x:Name="Spectrum" Grid.Row="1" Margin="0,12,0,3"/>
-              <TextBlock Grid.Row="2" Text="Double-click to add  ·  Drag to tune  ·  Right-click to remove  ·  Wheel to zoom" Classes="muted" FontSize="10"/>
+              <local:SpectrumControl x:Name="Spectrum" Grid.Row="1" MinHeight="125" Margin="0,12,0,3"/>
+              <Grid Grid.Row="2" ColumnDefinitions="*,Auto" Margin="0,6,0,7">
+                <TextBlock Text="WATERFALL" Classes="section" FontSize="10"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                  <TextBlock Text="−110" Classes="muted" FontSize="9"/>
+                  <Border Width="70" Height="7" VerticalAlignment="Center" CornerRadius="2">
+                    <Border.Background><LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%"><GradientStop Color="#0B1420" Offset="0"/><GradientStop Color="#183B89" Offset="0.2"/><GradientStop Color="#157CB5" Offset="0.4"/><GradientStop Color="#46D7C7" Offset="0.6"/><GradientStop Color="#F2D66A" Offset="0.8"/><GradientStop Color="#FFF6DF" Offset="1"/></LinearGradientBrush></Border.Background>
+                  </Border>
+                  <TextBlock Text="−20 dBFS" Classes="muted" FontSize="9"/>
+                </StackPanel>
+              </Grid>
+              <local:WaterfallControl x:Name="Waterfall" Grid.Row="3" Margin="0,0,0,8" ToolTip.Tip="Newest FFT at the top. Up to 256 display frames; pauses when no new samples arrive. Zoom using the spectrum wheel."/>
+              <TextBlock Grid.Row="4" Text="Double-click to add  ·  Drag to tune  ·  Right-click to remove  ·  Wheel to zoom" Classes="muted" FontSize="10" TextWrapping="Wrap"/>
             </Grid>
           </Border>
           <Border Grid.Column="2" Classes="panel" Padding="14,12">

@@ -24,6 +24,7 @@ public sealed class SpectrumControl : Control
     public event Action<double>? AddRequested;
     public event Action<int, double>? RetuneRequested;
     public event Action<int>? RemoveRequested;
+    public event Action<double, double, double, double>? RangeChanged;
 
     public SpectrumControl() { Focusable = true; ClipToBounds = true; MinHeight = 150; }
 
@@ -41,6 +42,7 @@ public sealed class SpectrumControl : Control
         center = viewCenter = frequency;
         rate = span = sampleRate;
         frame = null;
+        RangeChanged?.Invoke(center, rate, viewCenter, span);
         InvalidateVisual();
     }
 
@@ -190,6 +192,7 @@ public sealed class SpectrumControl : Control
         viewCenter = anchor + (viewCenter - anchor) * newSpan / span;
         span = newSpan;
         viewCenter = Math.Clamp(viewCenter, center - rate / 2 + span / 2, center + rate / 2 - span / 2);
+        RangeChanged?.Invoke(center, rate, viewCenter, span);
         e.Handled = true;
         InvalidateVisual();
     }

@@ -1,8 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><AllowUnsafeBlocks>true</AllowUnsafeBlocks></PropertyGroup>
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- F5/debugging the UI must not turn the per-sample DSP loops into Debug code. -->
+    <Optimize Condition="'$(BadSdrDspConfiguration)' == 'Release'">true</Optimize>
+  </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../../../dmr/src/Dmr/Dmr.csproj" />
-    <ProjectReference Include="../../../iq-channelizer/src/IqChannelizer/IqChannelizer.csproj" />
+    <InternalsVisibleTo Include="BadSdr.Tests" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" />
   </ItemGroup>
 </Project>

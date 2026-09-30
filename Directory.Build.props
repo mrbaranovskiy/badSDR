@@ -6,7 +6,20 @@
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <PlatformTarget>x64</PlatformTarget>
+    <BadSdrDspConfiguration Condition="'$(BadSdrDspConfiguration)' == ''">Release</BadSdrDspConfiguration>
+    <!-- Live RX cannot wait for tier-0 DSP loops to be promoted after capture starts. -->
+    <TieredCompilation Condition="'$(TieredCompilation)' == ''">false</TieredCompilation>
   </PropertyGroup>
+  <!-- Explicit references in each app project prevent SDK transitive-reference inference from
+       rebuilding these dependencies in the UI's Debug configuration. -->
+  <ItemGroup>
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\dmr\src\Dmr\Dmr.csproj"
+                      AdditionalProperties="Configuration=$(BadSdrDspConfiguration)"
+                      SetConfiguration="Configuration=$(BadSdrDspConfiguration)" />
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\iq-channelizer\src\IqChannelizer\IqChannelizer.csproj"
+                      AdditionalProperties="Configuration=$(BadSdrDspConfiguration)"
+                      SetConfiguration="Configuration=$(BadSdrDspConfiguration)" />
+  </ItemGroup>
   <PropertyGroup>
     <!-- Optional app-local libusb from the existing Windows SDK checkout. No system DLLs are replaced. -->
     <BadSdrLibUsbPath Condition="'$(BadSdrLibUsbPath)' == '' and Exists('$(MSBuildThisFileDirectory)..\LibUSB\VS2022\MS64\dll\libusb-1.0.dll')">$(MSBuildThisFileDirectory)..\LibUSB\VS2022\MS64\dll\libusb-1.0.dll</BadSdrLibUsbPath>

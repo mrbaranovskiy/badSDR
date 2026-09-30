@@ -4,6 +4,7 @@ using System.Threading.Channels;
 using Dmr;
 using Microsoft.Data.Sqlite;
 using BadSdr.Core.Pipeline;
+using BadSdr.Core.Dsp;
 
 namespace BadSdr.Core.Storage;
 
@@ -117,7 +118,7 @@ public sealed class SessionStore : IAsyncDisposable
         string plan, MetricsSnapshot metrics, string? error)
     {
         ThrowIfFaulted();
-        await queue.Writer.WriteAsync(new RunEnd(runId, JsonSerializer.Serialize(new { settings, channels }),
+        await queue.Writer.WriteAsync(new RunEnd(runId, JsonSerializer.Serialize(new { settings, channels, dspBuild = DspBuildInfo.Details }),
             plan, JsonSerializer.Serialize(metrics), error));
     }
 

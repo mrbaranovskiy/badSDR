@@ -9,6 +9,7 @@ using BadSdr.Core;
 using BadSdr.Core.Pipeline;
 using BadSdr.Core.Sources;
 using BadSdr.Core.Storage;
+using BadSdr.Core.Dsp;
 using IqChannelizer.Abstractions;
 
 namespace BadSdr.App;
@@ -29,11 +30,14 @@ public partial class MainWindow : Window
     internal Task Initialization { get; private set; } = Task.CompletedTask;
     internal int SessionCount { get; private set; }
     internal string CurrentStatus => StatusText.Text ?? "";
+    internal MetricsSnapshot? CurrentMetrics => controller?.Metrics;
+    internal object ProbeDisplayState => new { ticks, timerEnabled = timer.IsEnabled, busy, closing, storeError = store?.Failure?.ToString() };
 
     public MainWindow() : this(null) { }
     internal MainWindow(string? testDatabase)
     {
         InitializeComponent();
+        Spectrum.RangeChanged += Waterfall.SetRange;
         smoke = testDatabase is not null;
         databasePath = testDatabase ?? Path.Combine(WorkspaceSettings.DataDirectory, "sessions.db");
         SourceBox.ItemsSource = Enum.GetValues<SourceKind>();
@@ -41,7 +45,9 @@ public partial class MainWindow : Window
         StrategyBox.ItemsSource = Enum.GetValues<ChannelizerStrategy>();
         BackendBox.ItemsSource = Enum.GetValues<ComputeBackendPreference>();
         FormatBox.ItemsSource = new[] { "wav", "cf32", "cs16", "cs32", "cu8" };
+        WireFormatBox.ItemsSource = new[] { "sc16", "sc8" };
         initialized = true;
+        QueueText.Text = DspBuildInfo.Summary;
         try
         {
             var saved = smoke ? new WorkspaceSettings(new(), []) : WorkspaceSettings.Load();
@@ -92,6 +98,7 @@ public partial class MainWindow : Window
         CenterFrequencyHz = Number(CenterBox, "Centre frequency") * 1e6, SampleRate = Number(RateBox, "Sample rate"),
         GainDb = Number(GainBox, "Gain"), BandwidthHz = Number(BandwidthBox, "Bandwidth"), Antenna = AntennaBox.Text?.Trim() ?? "",
         RxChannel = checked((uint)Integer(RxChannelBox, "RX channel")), ReplayPath = ReplayPathBox.Text?.Trim() ?? "",
+        WireFormat = (string)WireFormatBox.SelectedItem!,
         ReplayFormat = (string)FormatBox.SelectedItem!, ReplayRealtime = RealtimeBox.IsChecked == true,
         Processing = (ProcessingMode)ProcessingBox.SelectedItem!, Strategy = (ChannelizerStrategy)StrategyBox.SelectedItem!,
         Backend = (ComputeBackendPreference)BackendBox.SelectedItem!, BlockSize = Integer(BlockBox, "IQ block size"),
@@ -109,6 +116,7 @@ public partial class MainWindow : Window
         BandwidthBox.Text = settings.BandwidthHz.ToString(CultureInfo.InvariantCulture);
         AntennaBox.Text = settings.Antenna;
         RxChannelBox.Text = settings.RxChannel.ToString(CultureInfo.InvariantCulture);
+        WireFormatBox.SelectedItem = settings.WireFormat;
         ReplayPathBox.Text = settings.ReplayPath;
         FormatBox.SelectedItem = settings.ReplayFormat;
         RealtimeBox.IsChecked = settings.ReplayRealtime;
@@ -124,6 +132,7 @@ public partial class MainWindow : Window
     {
         if (!initialized) return;
         DevicePanel.IsVisible = SourceBox.SelectedItem is SourceKind.Usrp;
+        WireFormatPanel.IsVisible = SourceBox.SelectedItem is SourceKind.Usrp;
         ReplayPanel.IsVisible = SourceBox.SelectedItem is SourceKind.Replay;
     }
     private void DeviceSelected(object? sender, SelectionChangedEventArgs e)
@@ -148,6 +157,7 @@ public partial class MainWindow : Window
         bool restart = radio.IsRunning;
         Status("Connecting and applying receiver settings…");
         await radio.ConnectAsync(ReadSettings());
+        Waterfall.Clear();
         ShowActualSettings();
         if (restart) await radio.StartAsync(radio.Settings, channels);
         SaveSettings();
@@ -162,6 +172,7 @@ public partial class MainWindow : Window
         Status("Preparing receiver and channelizer…");
         StateText.Text = "●  PREPARING";
         await radio.StartAsync(ReadSettings(), channels);
+        Waterfall.Clear();
         previousMetrics = null;
         ShowActualSettings();
         ShowPlan();
@@ -237,6 +248,13 @@ public partial class MainWindow : Window
         nextChannelId = 2;
     }
     internal Task StartForSmokeAsync() => GuardAsync(StartReceiverAsync);
+    internal async Task ConfigureProbeAsync(WorkspaceSettings settings)
+    {
+        await RequireController().DisconnectAsync();
+        Populate(settings.Radio);
+        await ApplyChannelsAsync(settings.Channels);
+        nextChannelId = channels.Select(c => c.Id).DefaultIfEmpty(0).Max() + 1;
+    }
 
     private void ChannelSelected(object? sender, SelectionChangedEventArgs e)
     {
@@ -293,7 +311,9 @@ public partial class MainWindow : Window
     private void OnTick(object? sender, EventArgs e)
     {
         if (closing || controller is null || store is null) return;
-        Spectrum.SetFrame(controller.Spectrum);
+        var spectrumFrame = controller.Spectrum;
+        Spectrum.SetFrame(spectrumFrame);
+        Waterfall.SetFrame(spectrumFrame);
         ShowMetrics(controller.Metrics);
         DatabaseText.Text = $"{store.Written:N0} events";
         DatabaseDetail.Text = $"SQLite · {store.Pending:N0} queued";
@@ -331,11 +351,34 @@ public partial class MainWindow : Window
         ToolTip.SetTip(DropText, $"Total received {value.Received:N0}. Recent application loss: {(received > 0 ? 100.0 * dropped / received : 0):F2}%. Hardware loss is separate.");
         ThroughputText.Text = $"{value.ProcessingSamplesPerSecond / 1e6:F2} MS/s";
         double rate = controller?.Settings.SampleRate ?? 1;
-        ThroughputDetail.Text = $"{value.ProcessingSamplesPerSecond / rate:F2}× real time · {value.Processed / 1e6:F2} M IQ";
+        string workerLabel = value.DecoderWorkers == 1 ? "1 worker" : $"{value.DecoderWorkers} workers";
+        double receiveRate = elapsed > 0 ? received / elapsed : 0;
+        ThroughputDetail.Text = $"RX {receiveRate / 1e6:F2} MS/s · {workerLabel}";
+        ToolTip.SetTip(ThroughputText, "Estimated capacity uses the larger of dispatch wall time and the busiest receiver's work time.\n" +
+            $"{value.ProcessingSamplesPerSecond / rate:F2}× input rate. Current received IQ: {receiveRate / 1e6:F2} MS/s.\n" +
+            "Parallel stage times overlap; this is not a measured maximum sustainable input rate.");
+        ToolTip.SetTip(ThroughputDetail, "Actual received IQ over the last display interval. USB/UHD stalls lower this rate even when DSP capacity is high.");
         OverflowText.Text = value.Overflows.ToString("N0");
-        OverflowDetail.Text = $"{value.Timeouts:N0} timeouts · {value.Discontinuities:N0} resets";
-        QueueText.Text = $"IQ queue {value.QueuedBlocks} / {controller?.Settings.QueueCapacity} · tail {value.TailSamples:N0}";
-        TimingText.Text = $"Channelizer {value.ChannelizerSeconds * 1000:N0} ms  /  DMR {value.DecoderSeconds * 1000:N0} ms";
+        OverflowDetail.Text = $"{value.Timeouts:N0} timeouts · {value.RxRestarts:N0} RX restarts";
+        ToolTip.SetTip(OverflowDetail, $"{value.Discontinuities:N0} processing gap resets. " +
+            "If UHD delivers no IQ for one second, the RX stream is stopped, drained and restarted. " +
+            "Three unsuccessful restarts stop capture with an error.");
+        QueueText.Text = $"{DspBuildInfo.Summary} · IQ queue {value.QueuedBlocks} / {controller?.Settings.QueueCapacity} (peak {value.PeakQueuedBlocks}) · tail {value.TailSamples:N0}";
+        ToolTip.SetTip(QueueText, $"IQ queue capacity: {1000.0 * controller?.Settings.QueueCapacity * controller?.Settings.BlockSize / rate:F1}ms of RF.\n" +
+            "A short queue can overflow during brief scheduling or driver stalls even when average DSP capacity is sufficient.");
+        TimingText.Text = $"Channelizer {value.ChannelizerSeconds:F2}s / DMR Σ {value.DecoderSeconds:F2}s / {workerLabel}";
+        double rfSeconds = value.Processed / rate;
+        ToolTip.SetTip(TimingText, $"Processed RF: {rfSeconds:F3}s\n" +
+            $"Channelizer: {value.ChannelizerSeconds:F3}s\n" +
+            $"DMR (sum of all receivers): {value.DecoderSeconds:F3}s; {value.DecoderRealtimeMultiple:F1}× per channel\n" +
+            $"Busiest DMR worker: {value.BusiestDecoderSeconds:F3}s; peak overlapping workers: {value.PeakActiveDecoderWorkers}\n" +
+            $"Dispatch: {value.DispatchSeconds:F3}s; decoder backpressure: {value.DecoderWaitSeconds:F3}s\n" +
+            $"Decoder queue peak: {value.DecoderPeakQueuedBatches} / 4 batches per receiver (~10 ms per batch)\n" +
+            $"DMR recovery / close (sum): {value.DecoderResetSeconds:F3}s; final drain wait: {value.DecoderDrainSeconds:F3}s\n" +
+            $"Channelizer gap handling: {value.ResetSeconds:F3}s\nOther dispatch work: {value.OtherProcessingSeconds:F3}s\n" +
+            $"Longest input block: {value.MaxBlockMilliseconds:F2}ms\n" +
+            $"Process allocations: {value.AllocatedBytes / 1e6:F1} MB; gen-2 collections: {value.Gen2Collections}\n" +
+            $"{DspBuildInfo.Summary}");
         previousMetrics = value;
     }
 

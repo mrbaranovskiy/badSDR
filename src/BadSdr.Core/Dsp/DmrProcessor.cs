@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Numerics;
+using System.Runtime.ExceptionServices;
 using Dmr;
 using IqChannelizer;
 using IqChannelizer.Abstractions;
@@ -11,6 +11,9 @@ namespace BadSdr.Core.Dsp;
 public interface IIqProcessor : IDisposable
 {
     string Description { get; }
+    // Asynchronous workers can fail while acquisition is waiting for its next buffer.
+    Exception? Failure => null;
+    CancellationToken FailureToken => CancellationToken.None;
     // Empty input may carry a terminal discontinuity after the last delivered IQ block.
     void Process(ReadOnlySpan<ComplexF> input, long firstSample, bool discontinuity);
     void Complete(bool interrupted);
@@ -18,13 +21,15 @@ public interface IIqProcessor : IDisposable
 
 public sealed class DmrProcessor : IIqProcessor, IChannelOutputSink
 {
-    private sealed class Decoder(DmrReceiver receiver, double rate, int bufferSize)
+    private sealed class OutputBuffer(int size)
     {
-        public readonly DmrReceiver Receiver = receiver;
-        public readonly double Rate = rate;
-        public Complex[] Conversion = new Complex[bufferSize];
+        public ComplexF[] Samples = new ComplexF[size];
+        public int Count;
     }
-    private readonly Dictionary<int, Decoder> decoders = new();
+    private readonly Dictionary<int, DmrDecoderWorker> decoders = new();
+    private readonly Dictionary<int, OutputBuffer> outputs = new();
+    private readonly CancellationTokenSource decoderCancellation = new();
+    private ExceptionDispatchInfo? decoderFailure;
     private readonly PipelineMetrics metrics;
     private readonly double inputRate;
     private IStreamingChannelizer? channelizer;
@@ -32,8 +37,12 @@ public sealed class DmrProcessor : IIqProcessor, IChannelOutputSink
     private int pending;
     private long expected;
     private bool completed;
+    private bool disposed;
+    public Exception? Failure => Volatile.Read(ref decoderFailure)?.SourceException;
+    public CancellationToken FailureToken => decoderCancellation.Token;
     public string Description { get; private set; } = "Spectrum only · no DMR channels";
 
+    /// <param name="sink">Called concurrently across receivers, in order within each receiver.</param>
     public DmrProcessor(RadioSettings settings, IReadOnlyList<ListenChannel> channels,
         PipelineMetrics metrics, Action<CapturedEvent> sink, string runId)
     {
@@ -83,7 +92,8 @@ public sealed class DmrProcessor : IIqProcessor, IChannelOutputSink
                         Interlocked.Increment(ref metrics.Events);
                         sink(new(runId, channel, captureTime, ev));
                     });
-                decoders.Add(channel.Id, new(receiver, rate, plan?.OutputSamplesPerProcess ?? settings.BlockSize));
+                decoders.Add(channel.Id, new(receiver, rate, metrics, decoderCancellation.Token, DecoderFailed));
+                if (plan is not null) outputs.Add(channel.Id, new(Math.Max(1, plan.OutputSamplesPerProcess)));
             }
             if (channelizer is not null)
             {
@@ -95,16 +105,33 @@ public sealed class DmrProcessor : IIqProcessor, IChannelOutputSink
             }
             else Description = $"Direct DMR · {inputRate:N0} S/s per receiver" +
                 (fallbackReason is null ? "" : $"\nChannelizer fallback: {fallbackReason}");
+            metrics.DecoderWorkers = decoders.Count;
+            Description += $"\nDMR: {decoders.Count} parallel receiver workers · ~10 ms batches · {DmrDecoderWorker.QueueCapacity} queued batches/receiver";
         }
-        catch { channelizer?.Dispose(); throw; }
+        catch
+        {
+            decoderCancellation.Cancel();
+            foreach (var decoder in decoders.Values) decoder.Join();
+            channelizer?.Dispose();
+            decoderCancellation.Dispose();
+            throw;
+        }
     }
 
     public void Process(ReadOnlySpan<ComplexF> input, long firstSample, bool discontinuity)
+    {
+        ThrowIfDecoderFailed();
+        try { ProcessCore(input, firstSample, discontinuity); }
+        catch { ThrowIfDecoderFailed(); throw; }
+    }
+
+    private void ProcessCore(ReadOnlySpan<ComplexF> input, long firstSample, bool discontinuity)
     {
         if (completed) throw new InvalidOperationException("The processor is complete.");
         if (firstSample < expected) throw new ArgumentException("IQ sample indices must be monotonic.");
         if (discontinuity || firstSample != expected)
         {
+            long resetStart = Stopwatch.GetTimestamp();
             Interlocked.Increment(ref metrics.Discontinuities);
             Interlocked.Add(ref metrics.TailSamples, pending);
             pending = 0;
@@ -113,13 +140,26 @@ public sealed class DmrProcessor : IIqProcessor, IChannelOutputSink
             foreach (var decoder in decoders.Values)
             {
                 long target = (long)Math.Round(firstSample * decoder.Rate / inputRate);
-                decoder.Receiver.Discontinuity(Math.Max(0, target - decoder.Receiver.SamplesProcessed));
+                decoder.Reset(target);
             }
+            Interlocked.Add(ref metrics.ResetTicks, Stopwatch.GetTimestamp() - resetStart);
         }
         expected = firstSample + input.Length;
         if (channelizer is null)
         {
-            foreach (var channel in decoders.Keys) Write(channel, input);
+            if (decoders.Count == 0) return;
+            long start = Stopwatch.GetTimestamp();
+            try
+            {
+                // Spread large direct/replay buffers across all receivers before filling any queue.
+                while (!input.IsEmpty)
+                {
+                    int count = Math.Min(input.Length, DmrDecoderWorker.BatchSize(inputRate));
+                    foreach (var decoder in decoders.Values) decoder.Append(input[..count]);
+                    input = input[count..];
+                }
+            }
+            finally { Interlocked.Add(ref metrics.DispatchTicks, Stopwatch.GetTimestamp() - start); }
             return;
         }
         var requirements = channelizer.InputRequirements;
@@ -131,9 +171,10 @@ public sealed class DmrProcessor : IIqProcessor, IChannelOutputSink
             input = input[count..];
             if (pending != requirements.ChunkSize) continue;
             long start = Stopwatch.GetTimestamp();
-            long decoderBefore = metrics.DecoderTicks;
+            long dispatchBefore = metrics.DispatchTicks;
             channelizer.Process(buffer);
-            Interlocked.Add(ref metrics.ChannelizerTicks, Stopwatch.GetTimestamp() - start - (metrics.DecoderTicks - decoderBefore));
+            Interlocked.Add(ref metrics.ChannelizerTicks, Stopwatch.GetTimestamp() - start - (metrics.DispatchTicks - dispatchBefore));
+            DispatchOutputs();
             buffer.AsSpan(requirements.ChunkSize, requirements.HistorySize).CopyTo(buffer);
             pending = 0;
         }
@@ -141,12 +182,33 @@ public sealed class DmrProcessor : IIqProcessor, IChannelOutputSink
 
     public void Write(int channelId, ReadOnlySpan<ComplexF> samples)
     {
-        var decoder = decoders[channelId];
         long start = Stopwatch.GetTimestamp();
-        if (decoder.Conversion.Length < samples.Length) Array.Resize(ref decoder.Conversion, samples.Length);
-        for (int i = 0; i < samples.Length; i++) decoder.Conversion[i] = new(samples[i].Real, samples[i].Imaginary);
-        decoder.Receiver.Push(decoder.Conversion.AsSpan(0, samples.Length));
-        Interlocked.Add(ref metrics.DecoderTicks, Stopwatch.GetTimestamp() - start);
+        try
+        {
+            // The library owns this span. Stage one output round before dispatching it fairly.
+            var output = outputs[channelId];
+            int needed = checked(output.Count + samples.Length);
+            if (output.Samples.Length < needed) Array.Resize(ref output.Samples, needed);
+            samples.CopyTo(output.Samples.AsSpan(output.Count));
+            output.Count = needed;
+        }
+        finally { Interlocked.Add(ref metrics.DispatchTicks, Stopwatch.GetTimestamp() - start); }
+    }
+
+    private void DispatchOutputs()
+    {
+        long start = Stopwatch.GetTimestamp();
+        try
+        {
+            int maximum = outputs.Count == 0 ? 0 : outputs.Values.Max(output => output.Count);
+            int batch = DmrDecoderWorker.BatchSize(48_000);
+            for (int offset = 0; offset < maximum; offset += batch)
+                foreach (var (id, output) in outputs)
+                    if (offset < output.Count)
+                        decoders[id].Append(output.Samples.AsSpan(offset, Math.Min(batch, output.Count - offset)));
+            foreach (var output in outputs.Values) output.Count = 0;
+        }
+        finally { Interlocked.Add(ref metrics.DispatchTicks, Stopwatch.GetTimestamp() - start); }
     }
 
     public void Complete(bool interrupted)
@@ -156,13 +218,38 @@ public sealed class DmrProcessor : IIqProcessor, IChannelOutputSink
         // A partial input block is not zero-padded: doing so would invent RF samples.
         Interlocked.Add(ref metrics.TailSamples, pending);
         pending = 0;
-        channelizer?.Flush();
+        long flushStart = Stopwatch.GetTimestamp(), dispatchBefore = metrics.DispatchTicks;
+        try { if (!decoderCancellation.IsCancellationRequested) channelizer?.Flush(); }
+        catch (Exception error) { DecoderFailed(error); }
+        finally { Interlocked.Add(ref metrics.ChannelizerTicks, Stopwatch.GetTimestamp() - flushStart - (metrics.DispatchTicks - dispatchBefore)); }
+        try { if (!decoderCancellation.IsCancellationRequested) DispatchOutputs(); }
+        catch (Exception error) { DecoderFailed(error); }
+        long dispatchStart = Stopwatch.GetTimestamp();
         foreach (var decoder in decoders.Values)
         {
-            if (interrupted) decoder.Receiver.Discontinuity(0);
-            decoder.Receiver.Complete();
+            try { decoder.FinishInput(interrupted); }
+            catch (Exception error) { DecoderFailed(error); }
         }
+        Interlocked.Add(ref metrics.DispatchTicks, Stopwatch.GetTimestamp() - dispatchStart);
+        long drainStart = Stopwatch.GetTimestamp();
+        foreach (var decoder in decoders.Values) decoder.Join();
+        Interlocked.Add(ref metrics.DecoderDrainTicks, Stopwatch.GetTimestamp() - drainStart);
+        ThrowIfDecoderFailed();
     }
 
-    public void Dispose() => channelizer?.Dispose();
+    private void DecoderFailed(Exception error)
+    {
+        Interlocked.CompareExchange(ref decoderFailure, ExceptionDispatchInfo.Capture(error), null);
+        decoderCancellation.Cancel();
+    }
+
+    private void ThrowIfDecoderFailed() => Volatile.Read(ref decoderFailure)?.Throw();
+
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+        try { Complete(true); }
+        finally { channelizer?.Dispose(); decoderCancellation.Dispose(); }
+    }
 }

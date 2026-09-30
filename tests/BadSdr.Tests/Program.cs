@@ -12,21 +12,32 @@ using Microsoft.Data.Sqlite;
 
 namespace BadSdr.Tests;
 
-internal static class Program
+internal static partial class Program
 {
     private static string fixture = "";
     private static readonly string Output = Path.GetFullPath("artifacts/tests/" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss"));
     public static async Task<int> Main(string[] args)
     {
+        if (args.Contains("--performance")) return await PerformanceProbe.RunAsync(args);
         Directory.CreateDirectory(Output);
         fixture = FindFixture();
         var tests = new (string Name, Func<Task> Run)[]
         {
+            ("Loaded DSP assemblies are optimized", OptimizedBuild),
             ("FFT frequency and amplitude", Fft),
             ("Direct DMR fixture and SQLite persistence", DirectFixture),
             ("Wideband two-channel DMR extraction", Wideband),
+            ("Parallel DMR overlap, bounded queues and borrowed-buffer ownership", ParallelWorkers),
+            ("Parallel receivers preserve order across gaps and final drain", ParallelGaps),
+            ("Asynchronous DMR failure cancels a waiting source", ParallelFault),
             ("Bounded queue overload and buffer ownership", Overload),
             ("Hardware gaps propagate through a full queue", HardwareGaps),
+            ("USRP transient overflow preserves driver recovery", UsrpTransientOverflow),
+            ("USRP stalled overflow restarts and marks resumed IQ", UsrpStalledOverflow),
+            ("USRP retry limit stops a dead input and drains capture", UsrpRetryLimit),
+            ("USRP sustained recovery renews retry budget", UsrpRecoveryBudget),
+            ("USRP cancellation prevents restarting stopped capture", UsrpRecoveryCancellation),
+            ("USRP restart preserves parallel DMR payloads and order", UsrpRecoveredDmr),
             ("Decoder closes sessions at sample gaps", DecoderGaps),
             ("Processing failure stops capture", Fault),
             ("Stop cancels blocking source reads", Cancellation),
@@ -84,6 +95,14 @@ internal static class Program
         return Task.CompletedTask;
     }
 
+    private static Task OptimizedBuild()
+    {
+        Check(DspBuildInfo.IsOptimized, "Debug UI builds must load optimized DSP assemblies: " + System.Text.Json.JsonSerializer.Serialize(DspBuildInfo.Details));
+        Check(bool.TryParse(AppContext.GetData("System.Runtime.TieredCompilation")?.ToString(), out bool tiered) && !tiered,
+            "Live DSP must start optimized, without the initial tiered-JIT throughput penalty.");
+        return Task.CompletedTask;
+    }
+
     private static async Task DirectFixture()
     {
         string path = Path.Combine(Output, "fixture.db");
@@ -111,7 +130,7 @@ internal static class Program
         Check((await reopened.ReadRecentAsync()).Count > 0, "Sessions did not survive reopening the database.");
     }
 
-    private static void ReplayInto(IIqProcessor processor)
+    private static void ReplayInto(IIqProcessor processor, bool poisonAfterCopy = false)
     {
         using var reader = new IqReader(fixture);
         var iq = new Complex[7139];
@@ -122,6 +141,7 @@ internal static class Program
         {
             for (int i = 0; i < count; i++) single[i] = new((float)iq[i].Real, (float)iq[i].Imaginary);
             processor.Process(single.AsSpan(0, count), index, false);
+            if (poisonAfterCopy) single.AsSpan(0, count).Fill(new(float.NaN, float.NaN));
             index += count;
         }
     }
@@ -132,10 +152,10 @@ internal static class Program
         double rate = 54688 * factor;
         var settings = FixtureSettings with { SampleRate = rate, Processing = ProcessingMode.Channelizer,
             Strategy = ChannelizerStrategy.Fdc, BlockSize = 8192 };
-        var frames = new Dictionary<int, int> { [1] = 0, [2] = 0 };
+        int[] frames = [0, 0];
         var metrics = new PipelineMetrics();
         using var processor = new DmrProcessor(settings, [new(1, 434_987_500), new(2, 435_087_500)], metrics,
-            ev => { if (ev.Event.Type == "vocoder_frame") frames[ev.Channel.Id]++; }, "wideband");
+            ev => { if (ev.Event.Type == "vocoder_frame") Interlocked.Increment(ref frames[ev.Channel.Id - 1]); }, "wideband");
         using var reader = new IqReader(fixture);
         var input = new Complex[1021];
         var wide = new ComplexF[input.Length * factor];
@@ -155,8 +175,8 @@ internal static class Program
             position += count * factor;
         }
         processor.Complete(false);
-        File.WriteAllText(Path.Combine(Output, "channelizer.txt"), processor.Description + "\n" + string.Join("\n", frames.Select(p => $"Channel {p.Key}: {p.Value} frames")));
-        Check(frames.All(pair => pair.Value == 216), "Two-channel frame counts: " + string.Join(", ", frames.Select(p => $"{p.Key}={p.Value}")));
+        File.WriteAllText(Path.Combine(Output, "channelizer.txt"), processor.Description + "\n" + string.Join("\n", frames.Select((count, i) => $"Channel {i + 1}: {count} frames")));
+        Check(frames.All(count => count == 216), "Two-channel frame counts: " + string.Join(", ", frames));
         Check(metrics.ChannelizerTicks > 0 && metrics.DecoderTicks > 0, "Separate library timings were not collected.");
         return Task.CompletedTask;
     }
@@ -174,6 +194,8 @@ internal static class Program
         Check(snapshot.Received == snapshot.Processed + snapshot.Dropped, "IQ sample accounting is not exact.");
         Check(processor.CorruptBlocks == 0, "Producer overwrote a consumer-owned buffer.");
         Check(snapshot.QueuedBlocks == 0, "Queue was not drained.");
+        Check(snapshot.PeakQueuedBlocks is > 0 and <= 2 && snapshot.MaxBlockMilliseconds > 0,
+            "Queue pressure or processing stalls were not measured.");
         Console.WriteLine($"  overload: {snapshot.Dropped:N0}/{snapshot.Received:N0} samples dropped");
     }
 
@@ -198,14 +220,14 @@ internal static class Program
         using var processor = new DmrProcessor(FixtureSettings, [new(1, 434_987_500)], metrics, ev =>
         {
             events.Add(ev);
-            if (ev.Event.Type == "call_start") active = true;
-            if (ev.Event.Type == "call_end") active = false;
+            if (ev.Event.Type == "call_start") Volatile.Write(ref active, true);
+            if (ev.Event.Type == "call_end") Volatile.Write(ref active, false);
         }, "gaps");
         using var reader = new IqReader(fixture);
         var buffer = new Complex[1024];
         var single = new ComplexF[1024];
         long position = 0;
-        while (!active)
+        while (!Volatile.Read(ref active))
         {
             int count = reader.Read(buffer);
             Check(count > 0, "No active DMR call found before the test gap.");
@@ -216,6 +238,9 @@ internal static class Program
         processor.Process(single, position + 4096, false);
         processor.Complete(false);
         Check(metrics.Discontinuities == 1, "A gap did not reset the decoder.");
+        Check(metrics.ResetTicks > 0 && metrics.DecoderResetTicks > 0, "Decoder gap recovery was omitted from the timing breakdown.");
+        Check(Math.Abs(metrics.Snapshot().DecoderInputSeconds - (position + single.Length) / FixtureSettings.SampleRate) < 1e-5,
+            "Per-channel real-time accounting included missing samples.");
         Check(events.Any(e => e.Event.Type == "sync_lost" && Convert.ToInt64(e.Event.Data.GetValueOrDefault("missing_samples")) == 4096), "Gap length did not reach DMR.");
         Check(events.Any(e => e.Event.Type == "call_end" && e.Event.Data.GetValueOrDefault("reason")?.ToString() == "discontinuity"), "Active call was joined across a gap.");
         return Task.CompletedTask;
@@ -292,6 +317,13 @@ internal static class Program
         }
         catch (InvalidOperationException) { failed = true; }
         Check(failed, "Direct mode accepted a wideband stream.");
+        Check(System.Text.Json.JsonSerializer.Deserialize<RadioSettings>("{}")!.WireFormat == "sc16",
+            "Existing settings must retain 16-bit transport.");
+        (new RadioSettings { WireFormat = "sc8" }).Validate();
+        failed = false;
+        try { (new RadioSettings { WireFormat = "invalid" }).Validate(); }
+        catch (ArgumentException) { failed = true; }
+        Check(failed, "An unsupported USRP wire format was accepted.");
         return Task.CompletedTask;
     }
 

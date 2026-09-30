@@ -15,6 +15,7 @@ public sealed record RadioSettings
     public double BandwidthHz { get; init; } = 1_000_000;
     public string Antenna { get; init; } = "RX2";
     public uint RxChannel { get; init; }
+    public string WireFormat { get; init; } = "sc16";
     public string ReplayPath { get; init; } = "";
     public string ReplayFormat { get; init; } = "wav";
     public bool ReplayRealtime { get; init; } = true;
@@ -26,6 +27,8 @@ public sealed record RadioSettings
 
     public void Validate()
     {
+        if (WireFormat is not ("sc16" or "sc8"))
+            throw new ArgumentException("USRP wire format must be sc16 or sc8.");
         if (!double.IsFinite(CenterFrequencyHz) || CenterFrequencyHz <= 0)
             throw new ArgumentException("Centre frequency must be positive.");
         if (!double.IsFinite(SampleRate) || SampleRate < 24000 || SampleRate > 200_000_000)

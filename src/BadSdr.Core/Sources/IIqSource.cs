@@ -12,7 +12,7 @@ public interface IIqSource : IDisposable
 }
 
 public readonly record struct SourceRead(int Count, bool EndOfStream = false,
-    bool Discontinuity = false, bool Overflow = false, bool Timeout = false);
+    bool Discontinuity = false, bool Overflow = false, bool Timeout = false, bool RxRestarted = false);
 
 public static class SourceFactory
 {

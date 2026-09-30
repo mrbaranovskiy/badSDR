@@ -6,6 +6,10 @@
   <Folder Name="/tests/">
     <Project Path="tests/BadSdr.Tests/BadSdr.Tests.csproj" />
   </Folder>
-  <Project Path="../dmr/src/Dmr/Dmr.csproj" />
-  <Project Path="../iq-channelizer/src/IqChannelizer/IqChannelizer.csproj" />
+  <Project Path="../dmr/src/Dmr/Dmr.csproj">
+    <BuildType Solution="Debug|*" Project="Release" />
+  </Project>
+  <Project Path="../iq-channelizer/src/IqChannelizer/IqChannelizer.csproj">
+    <BuildType Solution="Debug|*" Project="Release" />
+  </Project>
 </Solution>

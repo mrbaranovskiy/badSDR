@@ -8,6 +8,7 @@ internal static class Program
     public static int Main(string[] args)
     {
         if (args.Contains("--smoke-test")) return UiSmoke.Run(args);
+        if (args.Contains("--live-ui-probe")) return UiSmoke.RunLive(args);
         return BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
