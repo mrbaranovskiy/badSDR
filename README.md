@@ -166,3 +166,4 @@ For diagnosis, `--rate`, `--wire-format`, `--block-size`, `--device-args`, `--cu
 See [parallel DMR validation](docs/parallel-dmr.md) for the current design and results, and the [initial performance investigation](docs/performance-2026-09-26.md) for the build/JIT/reset fixes.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before redistributing a published folder.
+https://github.com/vadimart92/iq-channelizer
